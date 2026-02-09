@@ -1,15 +1,19 @@
--- F3L Training Script
--- Copyright (c) 2026 Nikola Stojkovic
--- Released under the MIT License
--- This script is intended for F3L (RES) training use.
--- No warranty. Use at your own risk.
-
 -- F3L Training Script (EdgeTX / OpenTX Telemetry Script)
--- Stable training version for F3L
--- Flight: remaining time (freezes at landing), Flight time: duration
--- Clean 1Hz last 15s countdown, no repeated "zero"
--- SA down ends flight only (working time continues)
--- ENTER double-press (while working time runs) = reset flight window to 6:00
+-- Final test version (+ small robustness improvements)
+-- Working time:
+--  * 1:00 remaining -> voice "1 minute"
+--  * 0:30 remaining -> voice "30 seconds"
+--  * last 10s -> beep each second (no voice)
+-- Flight time:
+--  * voice per minute, 30/20s, last 15s spoken numbers
+-- SF:
+--  * speaks remaining working time in whole seconds
+-- Display:
+--  * tenths on screen
+-- Improvements added now:
+--  * Working time end = triple-beep pattern (very distinct)
+--  * SA landing sets armLaunch=false to prevent instant re-launch if elevator stays high
+--  * resetFlightOnly starts with armLaunch=false (requires elevator dip before next launch)
 
 ------------------------------------------------------------
 -- Constants
@@ -25,39 +29,46 @@ local SA_SOURCE    = "sa"
 
 local VOICE_MIN_GAP = 0.7
 local BACK_CONFIRM_WINDOW = 2.0
-local ENTER_DOUBLE_WINDOW = 1.0   -- seconds for double-press ENTER
+local ENTER_DOUBLE_WINDOW = 1.0
+
+local WORK_BEEP_SUPPRESS_AFTER_SPEECH = 0.9
 
 ------------------------------------------------------------
 -- State
 ------------------------------------------------------------
 local state = {
   lastFlightDuration = nil,
+  lastFlightDurationFloat = nil,
 
   windowRunning = false,
   windowStart   = 0,
 
   flightStarted  = false,
-  flightStart    = 0,      -- float seconds
-  flightStartSec = 0,      -- integer seconds (for clean 1Hz countdown)
+  flightStart    = 0,
+  flightStartSec = 0,
   flightEnded    = false,
   flightEnd      = 0,
 
-  armLaunch      = false,
+  armLaunch = false,
 
-  sfPrev         = false,
-  saPrev         = 0,
+  sfPrev = false,
+  saPrev = 0,
 
   lastFlightRemMin = nil,
   lastFlightRemSec = nil,
 
-  lastVoiceAt    = -9999,
-
+  lastVoiceAt = -9999,
   lastCountdownSpoken = nil,
 
-  backArmedUntil     = 0,
-  showBackHintUntil  = 0,
+  -- working warnings
+  workSpoke60 = false,
+  workSpoke30 = false,
+  lastWorkRemSec = nil,
+  suppressWorkBeepsUntil = 0,
 
-  enterArmedUntil    = 0  -- for ENTER double-press
+  backArmedUntil = 0,
+  showBackHintUntil = 0,
+  enterArmedUntil = 0
 }
 
 ------------------------------------------------------------
@@ -71,11 +82,14 @@ local function nowIntSeconds()
   return math.floor(nowSeconds() + 0.0001)
 end
 
-local function formatTime(sec)
+local function formatTimePrec(sec)
   if sec == nil or sec ~= sec or sec < 0 then sec = 0 end
-  local m = math.floor(sec / 60)
-  local s = math.floor(sec % 60)
-  return string.format("%02d:%02d", m, s)
+  local totalTenths = math.floor(sec * 10 + 0.5)
+  local tenths = totalTenths % 10
+  local secondsWhole = math.floor(totalTenths / 10)
+  local m = math.floor(secondsWhole / 60)
+  local s = secondsWhole % 60
+  return string.format("%02d:%02d.%d", m, s, tenths)
 end
 
 local function getElevPercent()
@@ -90,10 +104,12 @@ end
 
 local function markSpoke(t)
   state.lastVoiceAt = t
+  state.suppressWorkBeepsUntil = t + WORK_BEEP_SUPPRESS_AFTER_SPEECH
 end
 
 local function hardReset()
   state.lastFlightDuration = nil
+  state.lastFlightDurationFloat = nil
 
   state.windowRunning = false
   state.windowStart   = 0
@@ -109,8 +125,12 @@ local function hardReset()
   state.lastFlightRemMin = nil
   state.lastFlightRemSec = nil
   state.lastVoiceAt      = -9999
-
   state.lastCountdownSpoken = nil
+
+  state.workSpoke60 = false
+  state.workSpoke30 = false
+  state.lastWorkRemSec = nil
+  state.suppressWorkBeepsUntil = 0
 
   state.backArmedUntil    = 0
   state.showBackHintUntil = 0
@@ -119,7 +139,6 @@ local function hardReset()
   playTone(500, 180, 0, PLAY_BACKGROUND)
 end
 
--- Reset ONLY flight (keep working time running)
 local function resetFlightOnly()
   state.flightStarted  = false
   state.flightStart    = 0
@@ -128,17 +147,27 @@ local function resetFlightOnly()
   state.flightEnd      = 0
 
   state.lastFlightDuration = nil
+  state.lastFlightDurationFloat = nil
 
   state.lastFlightRemMin = nil
   state.lastFlightRemSec = nil
   state.lastCountdownSpoken = nil
   state.lastVoiceAt = -9999
 
-  -- allow new launch within current working time
-  state.armLaunch = state.windowRunning and true or false
+  -- Improvement: require elevator dip again before new launch
+  state.armLaunch = false
 
   playTone(1000, 150, 0, PLAY_BACKGROUND)
   playTone(1000, 150, 180, PLAY_BACKGROUND)
+end
+
+local function finishFlightAt(t)
+  state.flightEnded = true
+  state.flightEnd = t
+  local durFloat = state.flightEnd - state.flightStart
+  if durFloat < 0 then durFloat = 0 end
+  state.lastFlightDurationFloat = durFloat
+  state.lastFlightDuration = math.floor(durFloat + 0.5)
 end
 
 local function getFlightElapsed(t)
@@ -158,12 +187,52 @@ local function getFlightRemaining(t)
 end
 
 ------------------------------------------------------------
+-- Working-time alerts
+------------------------------------------------------------
+local function handleWorkingAlerts(t)
+  if not state.windowRunning then
+    state.workSpoke60 = false
+    state.workSpoke30 = false
+    state.lastWorkRemSec = nil
+    return
+  end
+
+  local remaining = math.floor(WORKING_TIME - (t - state.windowStart) + 0.5)
+  if remaining < 0 then remaining = 0 end
+
+  if remaining == 60 and not state.workSpoke60 then
+    if canSpeak(t) then
+      playDuration(60)
+      markSpoke(t)
+      state.workSpoke60 = true
+    end
+    return
+  end
+
+  if remaining == 30 and not state.workSpoke30 then
+    if canSpeak(t) then
+      playDuration(30)
+      markSpoke(t)
+      state.workSpoke30 = true
+    end
+    return
+  end
+
+  if remaining <= 10 and remaining >= 1 then
+    if t < state.suppressWorkBeepsUntil then return end
+    if state.lastWorkRemSec == nil or state.lastWorkRemSec ~= remaining then
+      playTone(1400, 60, 0, PLAY_BACKGROUND)
+      state.lastWorkRemSec = remaining
+    end
+  end
+end
+
+------------------------------------------------------------
 -- Input handling
 ------------------------------------------------------------
 local function handleInputs(event)
   local t = nowSeconds()
 
-  -- BACK double press = reset all
   if event == EVT_EXIT_BREAK then
     if state.backArmedUntil > t then
       hardReset()
@@ -176,44 +245,46 @@ local function handleInputs(event)
     end
   end
 
-  -- ENTER short press
   if event == EVT_ENTER_BREAK then
-    -- If idle: start working time
     if (not state.windowRunning) and state.windowStart == 0 then
       state.windowRunning = true
       state.windowStart   = t
       state.armLaunch     = true
       state.enterArmedUntil = 0
+
+      state.workSpoke60 = false
+      state.workSpoke30 = false
+      state.lastWorkRemSec = nil
+      state.suppressWorkBeepsUntil = 0
+
       playTone(1200, 200, 0, PLAY_BACKGROUND)
       return
     end
 
-    -- If working time is running: use ENTER double-press to reset flight only
     if state.windowRunning then
       if state.enterArmedUntil > t then
         resetFlightOnly()
         state.enterArmedUntil = 0
       else
         state.enterArmedUntil = t + ENTER_DOUBLE_WINDOW
-        playTone(700, 60, 0, PLAY_BACKGROUND) -- tiny "armed" tick
+        playTone(700, 60, 0, PLAY_BACKGROUND)
       end
     end
   end
 
-  -- SA down = landing: end flight ONLY (do not stop working time)
+  -- SA down = landing: end flight ONLY
   local sa = getValue(SA_SOURCE)
   if sa ~= nil and sa ~= state.saPrev then
     if sa < 0 and state.flightStarted and (not state.flightEnded) then
-      state.flightEnded = true
-      state.flightEnd   = t
-      state.lastFlightDuration = state.flightEnd - state.flightStart
+      finishFlightAt(t)
       playTone(800, 200, 0, PLAY_BACKGROUND)
-      -- working time continues
+      -- Improvement: prevent instant re-launch if elevator stays high
+      state.armLaunch = false
     end
     state.saPrev = sa
   end
 
-  -- SF momentary = speak remaining working time
+  -- SF momentary = speak remaining working time (integer only)
   local sf = getValue(SF_SOURCE)
   local sfActive = (sf ~= nil and sf < 0)
 
@@ -226,8 +297,10 @@ local function handleInputs(event)
     end
     if remaining < 0 then remaining = 0 end
 
+    local remainingSec = math.floor(remaining + 0.5)
+
     if canSpeak(t) then
-      playDuration(math.floor(remaining + 0.5))
+      playDuration(remainingSec)
       markSpoke(t)
     end
   end
@@ -236,7 +309,7 @@ local function handleInputs(event)
 end
 
 ------------------------------------------------------------
--- Flight voice cues (clean 1Hz countdown)
+-- Flight voice cues
 ------------------------------------------------------------
 local function handleFlightVoice(t)
   if not (state.flightStarted and not state.flightEnded) then return end
@@ -248,9 +321,7 @@ local function handleFlightVoice(t)
   local remaining = MAX_FLIGHT - elapsedSec
 
   if remaining <= 0 then
-    state.flightEnded = true
-    state.flightEnd = state.flightStart + MAX_FLIGHT
-    state.lastFlightDuration = state.flightEnd - state.flightStart
+    finishFlightAt(state.flightStart + MAX_FLIGHT)
     playTone(600, 350, 0, PLAY_BACKGROUND)
     return
   end
@@ -258,8 +329,7 @@ local function handleFlightVoice(t)
   local remMin = math.floor(remaining / 60)
   local remSec = remaining % 60
 
-  -- Full minutes 5..1 at mm:00
-  if remSec == 0 and remMin > 0 and remMin < (MAX_FLIGHT / 60) then
+  if remSec == 0 and remMin > 0 and remMin < 6 then
     if state.lastFlightRemMin ~= remMin and canSpeak(t) then
       playDuration(remMin * 60)
       markSpoke(t)
@@ -267,7 +337,6 @@ local function handleFlightVoice(t)
     end
   end
 
-  -- 30s / 20s
   if remMin == 0 and (remaining == 30 or remaining == 20) then
     if state.lastFlightRemSec ~= remaining and canSpeak(t) then
       playDuration(remaining)
@@ -276,7 +345,6 @@ local function handleFlightVoice(t)
     end
   end
 
-  -- Last 15 seconds: speak only on change
   if remaining <= 15 then
     if state.lastCountdownSpoken ~= remaining then
       playNumber(remaining, 0, 0)
@@ -325,19 +393,22 @@ local function updateState()
     end
   end
 
-  -- Working time expiry: stop working time, and stop flight if still running
+  -- Working time expiry
   if state.windowRunning and (t - state.windowStart) >= WORKING_TIME then
     state.windowRunning = false
+
+    -- distinct working time end pattern (triple beep)
+    playTone(900, 80, 0, PLAY_BACKGROUND)
+    playTone(900, 80, 120, PLAY_BACKGROUND)
+    playTone(900, 80, 240, PLAY_BACKGROUND)
+
     if state.flightStarted and not state.flightEnded then
-      state.flightEnded = true
-      state.flightEnd   = state.windowStart + WORKING_TIME
-      state.lastFlightDuration = state.flightEnd - state.flightStart
+      finishFlightAt(state.windowStart + WORKING_TIME)
       playTone(600, 350, 0, PLAY_BACKGROUND)
-    else
-      playTone(600, 200, 0, PLAY_BACKGROUND)
     end
   end
 
+  handleWorkingAlerts(t)
   handleFlightVoice(t)
 end
 
@@ -365,15 +436,15 @@ local function draw()
   if work < 0 then work = 0 end
 
   lcd.drawText(2, 16, "Working:", 0)
-  lcd.drawText(70, 16, formatTime(work), 0)
+  lcd.drawText(70, 16, formatTimePrec(work), 0)
 
   local flightRem = getFlightRemaining(t)
   lcd.drawText(2, 28, "Flight :", 0)
-  lcd.drawText(70, 28, formatTime(flightRem), 0)
+  lcd.drawText(70, 28, formatTimePrec(flightRem), 0)
 
-  if state.lastFlightDuration ~= nil then
+  if state.lastFlightDurationFloat ~= nil then
     lcd.drawText(2, 40, "Flight time:", 0)
-    lcd.drawText(70, 40, formatTime(state.lastFlightDuration), 0)
+    lcd.drawText(70, 40, formatTimePrec(state.lastFlightDurationFloat), 0)
   end
 
   lcd.drawText(2, 55, "ENTER start | SA land | SF WT", SMLSIZE)
@@ -388,6 +459,10 @@ local function init()
 
   local sa = getValue(SA_SOURCE)
   if sa ~= nil then state.saPrev = sa end
+
+  state.suppressWorkBeepsUntil = 0
+  state.backArmedUntil = 0
+  state.enterArmedUntil = 0
 end
 
 local function run(event)

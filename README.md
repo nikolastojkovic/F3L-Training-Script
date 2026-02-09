@@ -27,6 +27,7 @@ The script focuses on **clean timing, realistic task workflow, and minimal pilot
 - **SA switch DOWN** ends the flight
 - Working time continues
 - Actual flight duration is calculated
+- Prevents instant re-launch if elevator stays high
 - Displayed as:
   - Flight time: mm:ss
 
@@ -34,6 +35,7 @@ The script focuses on **clean timing, realistic task workflow, and minimal pilot
 ### 🔁 Multiple Flights per Working Time
 - While working time is running:
 - **Double-press ENTER** → resets **flight window only** (back to 6:00)
+- Requires elevator dip below **80% threshold** before next launch
 - Allows multiple launches inside the same 9-minute task
 
 ---
@@ -67,7 +69,7 @@ Spoken only at exact moments:
 - ENTER (start working time): confirmation beep
 - Flight start (launch detection): high beep
 - Landing (SA ↓): landing beep
-- Working time end: low tone
+- Working time end: **triple-beep pattern** (very distinct)
 - Reset actions: distinct confirmation tones
 
 ---
