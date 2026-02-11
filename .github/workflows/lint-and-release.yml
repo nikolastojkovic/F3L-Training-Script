@@ -93,6 +93,7 @@ jobs:
             echo "#### ✨ Features" >> /tmp/changelog.txt
             git log "$LAST_TAG..HEAD" --pretty=format:"- %s" --grep="^feat:" 2>/dev/null >> /tmp/changelog.txt
             echo "" >> /tmp/changelog.txt
+            cat /tmp/changelog.txt
           fi
           
           # Bug Fixes
