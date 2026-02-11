@@ -116,9 +116,8 @@ jobs:
             fi
           } > /tmp/changelog.txt
           
-          echo "body<<EOFCHANGELOG" >> $GITHUB_OUTPUT
-          cat /tmp/changelog.txt >> $GITHUB_OUTPUT
-          echo "EOFCHANGELOG" >> $GITHUB_OUTPUT
+          # Output the changelog file path
+          echo "file=/tmp/changelog.txt" >> $GITHUB_OUTPUT
 
       - name: Create Release
         id: create_release
@@ -128,7 +127,7 @@ jobs:
         with:
           tag_name: ${{ steps.next_version.outputs.version }}
           release_name: Release ${{ steps.next_version.outputs.version }}
-          body: ${{ steps.changelog.outputs.body }}
+          body_path: /tmp/changelog.txt
           draft: false
           prerelease: false
 
