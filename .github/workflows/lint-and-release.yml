@@ -90,26 +90,36 @@ jobs:
           echo "### Changes in $NEXT_VERSION" > /tmp/changelog.txt
           echo "" >> /tmp/changelog.txt
           
-          # Features
-          if git log "$LAST_TAG..HEAD" --oneline 2>/dev/null | grep -q "feat:"; then
-            echo "#### ✨ Features" >> /tmp/changelog.txt
-            git log "$LAST_TAG..HEAD" --pretty=format:"- %s" --grep="^feat:" 2>/dev/null >> /tmp/changelog.txt
-            echo "" >> /tmp/changelog.txt
+          # Check if this is the first release (no real tags)
+          if [ "$LAST_TAG" = "v0.0.0" ]; then
+            echo "#### 📝 Initial Release" >> /tmp/changelog.txt
+            git log --pretty=format:"- %s" 2>/dev/null >> /tmp/changelog.txt
+          else
+            # Features
+            if git log "$LAST_TAG..HEAD" --oneline 2>/dev/null | grep -q "feat:"; then
+              echo "#### ✨ Features" >> /tmp/changelog.txt
+              git log "$LAST_TAG..HEAD" --pretty=format:"- %s" --grep="^feat:" 2>/dev/null >> /tmp/changelog.txt
+              echo "" >> /tmp/changelog.txt
+            fi
+            
+            # Bug Fixes
+            if git log "$LAST_TAG..HEAD" --oneline 2>/dev/null | grep -q "fix:"; then
+              echo "#### 🐛 Bug Fixes" >> /tmp/changelog.txt
+              git log "$LAST_TAG..HEAD" --pretty=format:"- %s" --grep="^fix:" 2>/dev/null >> /tmp/changelog.txt
+              echo "" >> /tmp/changelog.txt
+            fi
+            
+            # Other changes
+            echo "#### 📝 Other Changes" >> /tmp/changelog.txt
+            git log "$LAST_TAG..HEAD" --pretty=format:"- %s" 2>/dev/null | grep -v "^- feat:" | grep -v "^- fix:" >> /tmp/changelog.txt
           fi
-          
-          # Bug Fixes
-          if git log "$LAST_TAG..HEAD" --oneline 2>/dev/null | grep -q "fix:"; then
-            echo "#### 🐛 Bug Fixes" >> /tmp/changelog.txt
-            git log "$LAST_TAG..HEAD" --pretty=format:"- %s" --grep="^fix:" 2>/dev/null >> /tmp/changelog.txt
-            echo "" >> /tmp/changelog.txt
-          fi
-          
-          # Other changes
-          echo "#### 📝 Other Changes" >> /tmp/changelog.txt
-          git log "$LAST_TAG..HEAD" --pretty=format:"- %s" 2>/dev/null | grep -v "^- feat:" | grep -v "^- fix:" >> /tmp/changelog.txt
           
           CHANGELOG=$(cat /tmp/changelog.txt)
-          echo "body=$CHANGELOG" >> $GITHUB_OUTPUT
+          {
+            echo "body<<EOF"
+            cat /tmp/changelog.txt
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
 
       - name: Create Release
         id: create_release
