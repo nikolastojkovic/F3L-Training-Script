@@ -8,8 +8,16 @@ globals = {
     "getValue",
     "playTone",
     "playFile",
+    "playDuration",
+    "playNumber",
     "lcd",
     "rfState",
+    -- Constants
+    "PLAY_BACKGROUND",
+    "EVT_EXIT_BREAK",
+    "EVT_ENTER_BREAK",
+    "MIDSIZE",
+    "SMLSIZE",
 }
 
 -- Ignore specific issues for this project
